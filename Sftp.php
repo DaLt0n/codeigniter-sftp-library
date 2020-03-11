@@ -45,6 +45,10 @@ defined('BASEPATH') OR exit('No direct script access allowed');
  * @author      ChillyOrange Devs Team
  * @link        https://github.com/chillyorange/codeigniter-sftp-library
  */
+
+/**
+ * Dependencies: yum install libssh2.x86_64 libssh2-devel.x86_64 ; pecl install ssh2
+ */
 class Sftp {
 
     var $hostname       = '';       // the hostname of the server
@@ -52,12 +56,13 @@ class Sftp {
     var $password       = '';       // password of the server
     var $pubkeyfile     = '';       // path to your public key file (e.g. /Users/username/.ssh/id_rsa.pub)
     var $prikeyfile     = '';       // path to your private key file (e.g. /Users/username/.ssh/id_rsa)
-    var $passphrse      = '';       // the passphrase of your key (leave blank if you don't have one)
+    var $passphrase      = '';       // the passphrase of your key (leave blank if you don't have one)
     var $port           = 22;
-    var $method         = 'key';    // By default login via username/password
-    var $debug          = FALSE;
-    var $conn           = FALSE;
-    var $sftp           = FALSE;
+    var $method         = 'auth';    // By default login via username/password
+    var $debug          = true;
+    var $conn           = false;
+    var $sftp           = false;
+    var $error_message  = '';
 
 
     /**
@@ -75,7 +80,6 @@ class Sftp {
         }
 
         log_message('debug', "sFTP Class Initialized");
-
         // Make sure that the SSH2 pecl is installed
         if ( ! function_exists('ssh2_connect'))
         {
@@ -131,10 +135,7 @@ class Sftp {
         // Try and login...
         if ( ! $this->_login())
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('sftp_unable_to_login_to_ssh');
-            }
+            $this->_error('sftp_unable_to_login_to_ssh');
             return FALSE;
         }
 
@@ -142,10 +143,7 @@ class Sftp {
         // If successful, set this resource as a global variable.
         if (FALSE === ($this->sftp = @ssh2_sftp($this->conn)))
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('sftp_unable_to_open_sftp_resource');
-            }
+            $this->_error('sftp_unable_to_open_sftp_resource');
             return FALSE;
         }
 
@@ -155,7 +153,7 @@ class Sftp {
     // --------------------------------------------------------------------
 
     /**
-     * SFTP Login
+     * SFTP Login (Passphrase callback not supported on libssh2, everything works if you dont need to authenticate with passphrase, alternative: phpseclib)
      *
      * @version 1.0.0
      * @access  private
@@ -163,51 +161,15 @@ class Sftp {
      */
     private function _login()
     {
-        if ($this->method == 'auth') {
-            if (@ssh2_auth_pubkey_file($this->conn, $this->username, $this->public_key_url, $this->private_key_url, $this->password)) {
-                return true;
-            } else {
-                if ($this->debug == TRUE)
-                {
-                    $this->_error('sftp_unable_to_connect_with_public_key');
-                }
-                return false;
+        if ($this->method == 'key') {
+            if ($this->passphrase != '') {
+                return @ssh2_auth_pubkey_file($this->conn, $this->username, $this->pubkeyfile, $this->prikeyfile, $this->passphrase);
             }
+            return @ssh2_auth_pubkey_file($this->conn, $this->username, $this->pubkeyfile, $this->prikeyfile);
         } else {
             return @ssh2_auth_password($this->conn, $this->username, $this->password);
         }
     }
-
-    // --------------------------------------------------------------------
-
-    /**
-     * sFTP Login via username/password
-     *
-     * @version 1.0.0
-     * @access  private
-     * @return  bool
-     */
-    private function _login_pass()
-    {
-        return @ssh2_auth_password($this->conn, $this->username, $this->password);
-    }
-
-    /**
-     * sFTP Login via keys
-     *
-     * @version 1.0.0
-     * @access  private
-     * @return  bool
-     */
-    private function _login_keys()
-    {
-        if ($this->passphrse != '')
-        {
-            return @ssh2_auth_pubkey_file($this->conn, $this->username, $this->pubkeyfile, $this->prikeyfile, $this->passphrse);
-        }
-        return @ssh2_auth_pubkey_file($this->conn, $this->username, $this->pubkeyfile, $this->prikeyfile);
-    }
-
 
     // --------------------------------------------------------------------
 
@@ -222,10 +184,7 @@ class Sftp {
     {
         if ( ! is_resource($this->conn) && ! is_resource($this->sftp))
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('sftp_no_connection');
-            }
+            $this->_error('sftp_no_connection');
             return FALSE;
         }
         return TRUE;
@@ -260,7 +219,7 @@ class Sftp {
 
         if ($result === FALSE)
         {
-            if ($this->debug == TRUE && $supress_debug == FALSE)
+            if ($supress_debug == FALSE)
             {
                 $this->_error('sftp_unable_to_changedir'); /// change this error
             }
@@ -268,6 +227,18 @@ class Sftp {
         }
 
         return TRUE;
+    }
+
+    /**
+     * Get file info
+     */
+    public function get_file_info($path = '') {
+        if ($path == '' OR ! $this->_is_conn())
+        {
+            return FALSE;
+        }
+
+        return @ssh2_sftp_stat($this->sftp, $path);
     }
 
     // --------------------------------------------------------------------
@@ -292,10 +263,7 @@ class Sftp {
 
         if ($result === FALSE)
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('sftp_unable_to_mkdir');
-            }
+            $this->_error('sftp_unable_to_mkdir');
             return FALSE;
         }
 
@@ -316,7 +284,7 @@ class Sftp {
      * @param   integer $permissions
      * @return  bool
      */
-    public function upload($locpath, $rempath, $mode = 'auto', $permissions = NULL)
+    public function upload($locpath, $rempath, $permissions = null)
     {
         if ( ! $this->_is_conn())
         {
@@ -325,43 +293,19 @@ class Sftp {
 
         if ( ! file_exists($locpath))
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('sftp_no_source_file');
-            }
+            $this->_error('sftp_no_source_file');
             return FALSE;
         }
 
-        // Set the mode if not specified
-        if ($mode == 'auto')
-        {
-            // Get the file extension so we can set the upload type
-            $ext    = $this->_getext($locpath);
-            $mode   = $this->_settype($ext);
-        }
-
-        $file_to_send = @file_get_contents($locpath);
-        $sftp = intVal($this->sftp);
-        //echo $this->sftp; die();
-        //$stream = fopen("ssh2.sftp://$this->sftp$rempath", 'w');
-        $stream = fopen("ssh2.sftp://{$sftp}{$rempath}", 'w');
-        //print_r($stream); die();
-
-        if (@fwrite($stream, $file_to_send) === FALSE)
-        {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('ftp_unable_to_upload');
-            }
+        if (! ssh2_scp_send($this->conn, $locpath, $rempath)) {
+            $this->_error('sftp_unable_to_upload');
             return FALSE;
         }
-
-        // Set file permissions if needed
-        if ( ! is_null($permissions))
-        {
-            $this->ssh2_sftp_chmod($this->sftp, $rempath, (int)$permissions);
+        if (!empty($permissions)) {
+            if (! $this->chmod($rempath, $permissions)) {
+                $this->_error('sftp_unable_to_chmod');
+            }
         }
-
         return TRUE;
     }
 
@@ -384,27 +328,10 @@ class Sftp {
             return FALSE;
         }
 
-        // Set the mode if not specified
-        if ($mode == 'auto')
-        {
-            // Get the file extension so we can set the upload type
-            $ext    = $this->_getext($rempath);
-            $mode   = $this->_settype($ext);
-        }
-
-        $file_to_get = @file_get_contents("ssh2.sftp://{$this->sftp}{$rempath}");
-
-        $stream = @fopen($locpath, 'w');
-
-        if (@fwrite($stream, $file_to_get) === FALSE)
-        {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('ftp_unable_to_download');
-            }
+        if (! ssh2_scp_recv($this->conn, $rempath, $locpath)) {
+            $this->_error('sftp_unable_to_download');
             return FALSE;
         }
-
         return TRUE;
     }
 
@@ -431,12 +358,8 @@ class Sftp {
 
         if ($result === FALSE)
         {
-            if ($this->debug == TRUE)
-            {
-                $msg = ($move == FALSE) ? 'ftp_unable_to_rename' : 'ftp_unable_to_move';
-
-                $this->_error($msg);
-            }
+            $msg = ($move == FALSE) ? 'sftp_unable_to_rename' : 'sftp_unable_to_move';
+            $this->_error($msg);
             return FALSE;
         }
 
@@ -480,10 +403,7 @@ class Sftp {
 
         if ($result === FALSE)
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('ftp_unable_to_delete');
-            }
+            $this->_error('sftp_unable_to_delete');
             return FALSE;
         }
 
@@ -530,10 +450,7 @@ class Sftp {
 
         if ($result === FALSE)
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('ftp_unable_to_delete');
-            }
+            $this->_error('sftp_unable_to_delete');
             return FALSE;
         }
 
@@ -561,10 +478,7 @@ class Sftp {
         // Permissions can only be set when running PHP 5
         if ( ! function_exists('ssh2_sftp_chmod'))
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('ftp_unable_to_chmod');
-            }
+            $this->_error('sftp_unable_to_chmod');
             return FALSE;
         }
 
@@ -572,10 +486,7 @@ class Sftp {
 
         if ($result === FALSE)
         {
-            if ($this->debug == TRUE)
-            {
-                $this->_error('ftp_unable_to_chmod');
-            }
+            $this->_error('sftp_unable_to_chmod');
             return FALSE;
         }
 
@@ -592,8 +503,9 @@ class Sftp {
      * @param   string  $path
      * @return  array
      */
-    public function list_files($path = '.')
+    public function list_files($path = null, $options = [])
     {
+
         if ( ! $this->_is_conn())
         {
             return FALSE;
@@ -602,14 +514,43 @@ class Sftp {
         $results = array();
 
         $sftp = intVal($this->sftp);
-        $files = $this->_scan_directory("ssh2.sftp://{$sftp}{$path}");
+        $files = $this->_scan_directory("ssh2.sftp://{$sftp}/{$path}");
 
         // exclude '.' and '..' from list of files
         foreach ($files as $file)
         {
             if ($file != '.' || $file != '..')
             {
-                $results[] = $file;
+                if (!empty($options['details']) || !empty($options['sortby'])) {
+                    // get file info
+                    $detail = $this->get_file_info($file);
+                    // prepare file info
+                    $results[] = [
+                        'name' => $file,
+                        'size' => !empty($detail['size']) ? $detail['size'] : null,
+                        'mtime' => !empty($detail['mtime']) ? date("Y-m-d H:i:s", $detail['mtime']) : null,
+                        'atime' => !empty($detail['atime']) ? date("Y-m-d H:i:s", $detail['atime']) : null,
+                    ];
+                } else {
+                    $results[] = $file;
+                }
+            }
+        }
+        // sort results
+        if (!empty($options['sortby'])) {
+            $sort_type = @current($options['sortby']);
+            $sort_key = @key($options['sortby']);
+            if (in_array($sort_key, ['name','size','mtime','atime'])) {
+                usort($results, function ($a, $b) use ($sort_type, $sort_key) {
+                    if ($a[$sort_key] == $b[$sort_key]) {
+                        return 0;
+                    }
+                    if ($sort_type == 'asc') {
+                        return ($a[$sort_key] < $b[$sort_key]) ? -1 : 1;
+                    } else {
+                        return ($a[$sort_key] > $b[$sort_key]) ? -1 : 1;
+                    }
+                });
             }
         }
 
@@ -631,16 +572,17 @@ class Sftp {
     function _scan_directory($dir, $recursive = FALSE)
     {
         $tempArray = array();
-        $handle = opendir($dir);
-
+        $handle = @opendir($dir);
         // List all the files
-        while (false !== ($file = readdir($handle))) {
-            if (substr("$file", 0, 1) != "."){
-                if(is_dir($file) && $recursive){
-                    // If its a directory, interate again
-                    $tempArray[$file] = $this->_scan_directory("$dir/$file");
-                } else {
-                    $tempArray[] = $file;
+        if (!empty($handle)) {
+            while (false !== ($file = readdir($handle))) {
+                if (substr("$file", 0, 1) != "."){
+                    if(is_dir($file) && $recursive){
+                        // If its a directory, interate again
+                        $tempArray[$file] = $this->_scan_directory("$dir/$file");
+                    } else {
+                        $tempArray[] = $file;
+                    }
                 }
             }
         }
@@ -668,7 +610,7 @@ class Sftp {
     {
         if ( ! $this->_is_conn())
         {
-            echo 'conn issue'; die();
+            $this->_error('sftp_connection_problem');
             return FALSE;
         }
 
@@ -719,7 +661,7 @@ class Sftp {
         $stream = ssh2_exec($this->conn, 'pwd');
         // Enable blocking for streams
         stream_set_blocking($stream, true);
-        return stream_get_contents($stream);
+        return trim(stream_get_contents($stream));
     }
 
     /**
@@ -797,6 +739,13 @@ class Sftp {
         return TRUE;
     }
 
+    /**
+     * Show error
+     */
+    public function get_errors() {
+        return $this->error;
+    }
+
     // ------------------------------------------------------------------------
 
     /**
@@ -809,9 +758,24 @@ class Sftp {
      */
     private function _error($line)
     {
-        //$CI =& get_instance();
-        //$CI->lang->load('ftp');
-        show_error($line);
+        $error_message = [
+            'sftp_unable_to_login_to_ssh' => 'unable to login to ssh',
+            'sftp_unable_to_open_sftp_resource' => 'unable to login to ssh',
+            'sftp_no_connection' => 'unable to login to ssh',
+            'sftp_unable_to_changedir' => 'unable to changedir',
+            'sftp_unable_to_mkdir' => 'unable to mkdir',
+            'sftp_no_source_file' => 'no source file',
+            'sftp_unable_to_upload' => 'unable to upload',
+            'sftp_unable_to_download' => 'unable to download',
+            'sftp_unable_to_delete' => 'unable to delete',
+            'sftp_unable_to_chmod' => 'unable to chmod',
+            'sftp_invalid_path' => 'invalid path',
+            'sftp_connection_problem' => 'connection problem',
+        ];
+        // set error
+        $this->error = !empty($error_message[$line]) ? $error_message[$line] : 'unknown error';
+        // show error (debug)
+        if ($this->debug) show_error($this->error);
     }
 
 
